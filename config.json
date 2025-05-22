@@ -1,0 +1,13 @@
+{
+  "rpc_http_endpoint": "https://rpc-palvus.pion-1.ntrn.tech",
+  "rpc_websocket_endpoint": "wss://rpc-palvus.pion-1.ntrn.tech/websocket",
+  "contract_address": "neutron13r9m3cn8zu6rnmkepajnm04zrry4g24exy9tunslseet0s9wrkkstcmkhr",
+  "reconnect_delay_seconds": 5,
+  "subscription_timeout_seconds": 30,
+  "event_retention_hours": 24,
+  "default_timeout_height": 1200,
+  "chain_id": "pion-1",
+  "fee_denom": "untrn",
+  "gas_limit": 200000,
+  "mnemonic_file": "mnemonic.txt"
+}
