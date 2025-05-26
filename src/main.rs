@@ -1,5 +1,77 @@
+//! # Beep Intent Filler
+//!
+//! This module implements the main entry point for the `beep-filler` application, an intent filler for
+//! a blockchain-based intent system, likely built for a Cosmos-based smart contract platform. It processes
+//! intent events (e.g., token swaps) by leveraging price and forex providers to fetch real-time market
+//! data, enabling profitability analysis and transaction execution.
+//!
+//! ## Overview
+//!
+//! The `beep-filler` binary initializes an `IntentExecutor` to handle intent events, an
+//! `IntentEventManager` to monitor blockchain events, and an interactive CLI for runtime configuration.
+//! It integrates with the `price_providers` and `forex_providers` modules to fetch token prices (e.g.,
+//! ATOM, NGN) and exchange rates (e.g., USD/EUR), respectively, for financial calculations.
+//!
+//! Key components:
+//! - **`IntentExecutor`**: Manages intent processing, price/forex provider integration, and cache management.
+//! - **`IntentEventManager`**: Subscribes to blockchain events (e.g., `IntentCreatedEvent`) and dispatches them for processing.
+//! - **Interactive CLI**: Allows runtime commands to add/remove providers, fetch rates, manage cache, and configure settings.
+//! - **`Config`**: Loads configuration from a JSON file or environment variables, with overrides via command-line arguments.
+//!
+//! ## Key Features
+//!
+//! - **Asynchronous Operation**: Uses `tokio` for non-blocking event handling, HTTP requests, and CLI input.
+//! - **Configurability**: Supports configuration via JSON file, environment variables, and command-line overrides.
+//! - **Extensibility**: Integrates pluggable price and forex providers via trait-based design.
+//! - **Error Handling**: Uses `anyhow::Result` for robust error propagation with contextual messages.
+//! - **Logging**: Employs `log` crate for detailed info, warning, and error logs.
+//! - **Thread Safety**: Uses `Arc<Mutex<>>` for shared access to `IntentExecutor` and `IntentEventManager`.
+//! - **Graceful Shutdown**: Handles Ctrl+C and CLI `exit` commands, ensuring cleanup of caches and event subscriptions.
+//!
+//! ## Usage
+//!
+//! Run the binary with optional configuration overrides:
+//!
+//! ```bash
+//! # Run with default config
+//! cargo run --bin beep-filler
+//!
+//! # Override configuration
+//! cargo run --bin beep-filler -- --config custom_config.json --rpc-http-endpoint http://localhost:26657
+//! ```
+//!
+//! Once running, the interactive CLI accepts commands like:
+//!
+//! ```text
+//! > add-price-provider ngn_price_provider
+//! > list-forex-providers
+//! > get-multiple-exchange-rates USD/NGN,EUR/NGN
+//! > exit
+//! ```
+//!
+//! Type `help` in the CLI for a full list of commands.
+//!
+//! ## Dependencies
+//!
+//! - `anyhow`: For error handling with contextual information.
+//! - `clap`: For parsing command-line arguments.
+//! - `dotenv`: For loading environment variables from a `.env` file.
+//! - `env_logger`: For initializing logging with environment-based configuration.
+//! - `tokio`: For asynchronous runtime, I/O, and signal handling.
+//! - `log`: For logging info, warnings, and errors.
+//! - `std`: For environment variables and synchronization primitives (`Arc`, `Mutex`).
+//! - Custom modules: `config`, `event`, `executor`, `forex_providers`, `price_providers`, `types`.
+//!
+//! ## Notes
+//!
+//! - **Mnemonic Requirement**: A mnemonic phrase must be provided via the `MNEMONIC` environment variable or a file specified in the config for blockchain interactions.
+//! - **API Dependencies**: Relies on external APIs (e.g., `exchangerate-api.com`, `currencylayer.com`, `coingecko.com`) for price and forex data, which may have rate limits. Consider caching in production.
+//! - **Configuration**: The config file (`config.json` by default) is optional; defaults are used if loading fails.
+//! - **Shutdown**: The application supports graceful shutdown via Ctrl+C or the `exit` CLI command, clearing caches and stopping event subscriptions.
+//! - **Thread Safety**: All shared resources (`IntentExecutor`, `IntentEventManager`) are wrapped in `Arc<Mutex<>>` for safe concurrent access.
+
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use dotenv::dotenv;
 use log::{error, info, warn};
 use std::env;
@@ -22,113 +94,51 @@ use forex_providers::{CurrencyLayerProvider, ExchangeRateApiProvider, ForexProvi
 use price_providers::{AtomCoinGeckoProvider, NGNPriceProvider, PriceProvider};
 use types::IntentCreatedEvent;
 
+/// Command-line arguments for the beep-filler application.
 #[derive(Parser)]
 #[command(name = "beep-filler")]
-#[command(about = "An intent filler for beep")]
+#[command(
+    about = "An intent filler for beep, processing blockchain intents with price and forex data"
+)]
 struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
-
     /// Configuration file path
-    #[arg(short, long, default_value = "config.json", global = true)]
+    #[arg(short, long, default_value = "config.json")]
     config: String,
 
     /// RPC HTTP endpoint override
-    #[arg(long, global = true)]
+    #[arg(long)]
     rpc_http_endpoint: Option<String>,
 
     /// RPC WebSocket endpoint override
-    #[arg(long, global = true)]
+    #[arg(long)]
     rpc_websocket_endpoint: Option<String>,
 
     /// Contract address override
-    #[arg(long, global = true)]
+    #[arg(long)]
     contract_address: Option<String>,
 
     /// Chain ID override
-    #[arg(long, global = true)]
+    #[arg(long)]
     chain_id: Option<String>,
 
     /// Minimum profit percentage override
-    #[arg(long, global = true)]
+    #[arg(long)]
     min_profit_percentage: Option<f64>,
 }
 
-#[derive(Subcommand)]
-enum Commands {
-    /// Run the intent filler with an interactive CLI
-    Run,
-    /// Add a price provider
-    AddPriceProvider {
-        #[arg(long)]
-        provider_name: String,
-    },
-    /// Remove a price provider
-    RemovePriceProvider {
-        #[arg(long)]
-        provider_name: String,
-    },
-    /// List all price providers
-    ListPriceProviders,
-    /// Add a forex provider
-    AddForexProvider {
-        #[arg(long)]
-        provider_name: String,
-        #[arg(long)]
-        api_key: Option<String>,
-    },
-    /// Remove a forex provider
-    RemoveForexProvider {
-        #[arg(long)]
-        provider_name: String,
-    },
-    /// List all forex providers
-    ListForexProviders,
-    /// List supported currency pairs
-    ListSupportedCurrencyPairs,
-    /// Check if a currency pair is supported
-    CheckCurrencyPair {
-        #[arg(long)]
-        base_currency: String,
-        #[arg(long)]
-        target_currency: String,
-    },
-    /// Get exchange rates for multiple currency pairs
-    GetMultipleExchangeRates {
-        #[arg(long, value_delimiter = ',')]
-        pairs: Vec<String>,
-    },
-    /// Clear the forex cache
-    ClearForexCache {
-        #[arg(long)]
-        currency_pair: Option<String>,
-    },
-    /// Clear the price cache
-    ClearPriceCache,
-    /// Set the minimum profit percentage
-    SetMinProfitPercentage {
-        #[arg(long)]
-        percentage: f64,
-    },
-    /// Get the minimum profit percentage
-    GetMinProfitPercentage,
-    /// Set the forex cache duration in hours
-    SetForexCacheDuration {
-        #[arg(long)]
-        hours: u64,
-    },
-    /// Get the forex cache duration in hours
-    GetForexCacheDuration,
-    /// Get forex cache statistics
-    GetForexCacheStats,
-}
-
+/// Main entry point for the beep-filler application.
+///
+/// Initializes configuration, sets up the intent executor and event manager, and runs an interactive
+/// CLI loop. Handles graceful shutdown via Ctrl+C or the `exit` command.
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize environment variables and logging
     dotenv().ok();
     env_logger::init();
 
     let cli = Cli::parse();
+
+    // Load and override configuration
     let mut config = Config::from_file(&cli.config).unwrap_or_else(|e| {
         warn!("Could not load config file: {}. Using defaults.", e);
         Config::default()
@@ -149,472 +159,190 @@ async fn main() -> Result<()> {
 
     config.validate().context("Invalid configuration")?;
 
-    let config_log = format!(
-        "Config {{ rpc_http_endpoint: {}, rpc_websocket_endpoint: {}, contract_address: {}, \
-         reconnect_delay_seconds: {}, subscription_timeout_seconds: {}, event_retention_hours: {}, \
-         default_timeout_height: {}, chain_id: {}, fee_denom: {}, gas_limit: {} }}",
-        config.rpc_http_endpoint,
-        config.rpc_websocket_endpoint,
-        config.contract_address,
-        config.reconnect_delay_seconds,
-        config.subscription_timeout_seconds,
-        config.event_retention_hours,
-        config.default_timeout_height,
-        config.chain_id,
-        config.fee_denom,
-        config.gas_limit
+    // Log configuration details
+    info!("Starting with config:");
+    info!("Config {{");
+    info!("  rpc_http_endpoint: {}", config.rpc_http_endpoint);
+    info!(
+        "  rpc_websocket_endpoint: {}",
+        config.rpc_websocket_endpoint
     );
-    let config_log = serde_json::json!(config_log).to_string();
-    info!("Starting with config: {}", config_log);
+    info!("  contract_address: {}", config.contract_address);
+    info!(
+        "  reconnect_delay_seconds: {}",
+        config.reconnect_delay_seconds
+    );
+    info!(
+        "  subscription_timeout_seconds: {}",
+        config.subscription_timeout_seconds
+    );
+    info!("  event_retention_hours: {}", config.event_retention_hours);
+    info!(
+        "  default_timeout_height: {}",
+        config.default_timeout_height
+    );
+    info!("  chain_id: {}", config.chain_id);
+    info!("  fee_denom: {}", config.fee_denom);
+    info!("  gas_limit: {}", config.gas_limit);
+    info!("}}");
 
-    match cli.command.unwrap_or(Commands::Run) {
-        Commands::Run => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
+    // Load mnemonic for blockchain interactions
+    let mnemonic = env::var("MNEMONIC")
+        .ok()
+        .or_else(|| config.load_mnemonic().ok().flatten())
+        .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
 
-            // Wrap IntentExecutor in Arc<Mutex<>> for shared mutable access
-            let intent_executor = Arc::new(Mutex::new(
-                IntentExecutor::new(config.clone(), mnemonic, cli.min_profit_percentage)
-                    .await
-                    .context("Failed to initialize IntentExecutor")?,
-            ));
+    // Initialize IntentExecutor with shared mutable access
+    let intent_executor = Arc::new(Mutex::new(
+        IntentExecutor::new(config.clone(), mnemonic, cli.min_profit_percentage)
+            .await
+            .context("Failed to initialize IntentExecutor")?,
+    ));
 
-            // Access executor for initialization logging
-            {
-                let executor = intent_executor.lock().await;
-                info!(
-                    "Current minimum profit percentage: {}%",
-                    executor.get_min_profit_percentage() * 100.0
-                );
-                info!(
-                    "Forex cache duration: {} hours",
-                    executor.get_forex_cache_duration_hours()
-                );
-                let supported_pairs = executor.get_supported_currency_pairs();
-                for (provider, currencies) in supported_pairs {
-                    info!(
-                        "Provider {} supports {} currencies",
-                        provider,
-                        currencies.len()
+    // Initialize IntentEventManager for blockchain event monitoring
+    let event_manager = Arc::new(Mutex::new(IntentEventManager::new(config.into())));
+    let event_map: IntentEventMap = Arc::clone(&event_manager.lock().await.event_map);
+
+    // Define callback for handling new intent events
+    let handle_new_intent = {
+        let executor = Arc::clone(&intent_executor);
+        let event_map = Arc::clone(&event_map);
+        move |event: IntentCreatedEvent| {
+            let executor = Arc::clone(&executor);
+            let event_map = Arc::clone(&event_map);
+            async move {
+                let executor = executor.lock().await;
+                if !executor.supports_currency_pair("USD", "NGN") {
+                    warn!(
+                        "USD/NGN pair not supported, skipping intent: {}",
+                        event.intent_id
                     );
+                    return;
+                }
+                match executor.handle_intent_event(event.clone()).await {
+                    Ok(()) => {
+                        event_map.remove(&event.intent_id);
+                        info!(
+                            "Successfully processed and removed event: {}",
+                            event.intent_id
+                        );
+                    }
+                    Err(e) => {
+                        error!("Failed to handle intent event {}: {}", event.intent_id, e);
+                    }
                 }
             }
+        }
+    };
 
-            let event_manager = Arc::new(Mutex::new(IntentEventManager::new(config.into())));
-            let event_map: IntentEventMap = Arc::clone(&event_manager.lock().await.event_map);
+    // Spawn event manager task to process blockchain events
+    let event_manager_handle = {
+        let event_manager = Arc::clone(&event_manager);
+        tokio::spawn(async move {
+            if let Err(e) = event_manager.lock().await.start(handle_new_intent).await {
+                error!("Event manager failed: {}", e);
+            }
+        })
+    };
 
-            let handle_new_intent = {
-                let executor = Arc::clone(&intent_executor);
-                let event_map = Arc::clone(&event_map);
-                move |event: IntentCreatedEvent| {
-                    let executor = Arc::clone(&executor);
-                    let event_map = Arc::clone(&event_map);
-                    async move {
-                        let executor = executor.lock().await;
-                        if !executor.supports_currency_pair("USD", "NGN") {
-                            warn!(
-                                "USD/NGN pair not supported, skipping intent: {}",
-                                event.intent_id
-                            );
-                            return;
-                        }
-                        match executor.handle_intent_event(event.clone()).await {
-                            Ok(()) => {
-                                event_map.remove(&event.intent_id);
-                                info!(
-                                    "Successfully processed and removed event: {}",
-                                    event.intent_id
-                                );
-                            }
-                            Err(e) => {
-                                error!("Failed to handle intent event {}: {}", event.intent_id, e);
-                            }
-                        }
-                    }
+    // Spawn interactive CLI loop
+    let cli_handle = {
+        let intent_executor = Arc::clone(&intent_executor);
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(io::stdin());
+            let mut line = String::new();
+            info!("beep-filler CLI ready. Type 'help' for commands or 'exit' to quit.");
+
+            loop {
+                line.clear();
+                print!("> ");
+                io::stdout().flush().await.unwrap();
+                if reader.read_line(&mut line).await.unwrap() == 0 {
+                    // EOF
+                    break;
                 }
-            };
+                let command = line.trim();
+                if command.is_empty() {
+                    continue;
+                }
 
-            let event_manager_handle = {
-                let event_manager = Arc::clone(&event_manager);
-                tokio::spawn(async move {
-                    if let Err(e) = event_manager.lock().await.start(handle_new_intent).await {
-                        error!("Event manager failed: {}", e);
-                    }
-                })
-            };
-
-            // Start the CLI loop
-            let cli_handle = {
-                let intent_executor = Arc::clone(&intent_executor);
-                tokio::spawn(async move {
-                    let mut reader = BufReader::new(io::stdin());
-                    let mut line = String::new();
-                    info!("beep-filler CLI ready. Type 'help' for commands or 'exit' to quit.");
-
-                    loop {
-                        line.clear();
-                        print!("> ");
-                        io::stdout().flush().await.unwrap();
-                        if reader.read_line(&mut line).await.unwrap() == 0 {
-                            // EOF
+                match process_command(&intent_executor, command).await {
+                    Ok(continue_running) => {
+                        if !continue_running {
                             break;
                         }
-                        let command = line.trim();
-                        if command.is_empty() {
-                            continue;
-                        }
-
-                        match process_command(&intent_executor, command).await {
-                            Ok(continue_running) => {
-                                if !continue_running {
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                error!("Command error: {}", e);
-                            }
-                        }
                     }
-                })
-            };
-
-            // Wait for shutdown signal or CLI exit
-            info!("Filler started. Press Ctrl+C or type 'exit' to stop.");
-            tokio::select! {
-                _ = signal::ctrl_c() => {
-                    info!("Shutdown signal received.");
-                }
-                _ = cli_handle => {
-                    info!("CLI loop exited.");
-                }
-            }
-
-            info!("Cleaning up...");
-            event_manager.lock().await.stop().await;
-            {
-                let executor = intent_executor.lock().await;
-                executor.clear_price_cache().await;
-                executor.clear_forex_cache(None).await;
-            }
-
-            if let Err(e) = event_manager_handle.await {
-                warn!("Event manager task did not shut down cleanly: {}", e);
-            }
-
-            info!("Shutdown complete.");
-        }
-        Commands::AddPriceProvider { provider_name } => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let mut intent_executor =
-                IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                    .await
-                    .context("Failed to initialize IntentExecutor")?;
-
-            let provider: Box<dyn PriceProvider> = match provider_name.as_str() {
-                "ngn_price_provider" => Box::new(NGNPriceProvider),
-                "atom_coingecko" => Box::new(AtomCoinGeckoProvider),
-                _ => {
-                    return Err(anyhow::anyhow!(
-                        "Unknown price provider: {}. Supported: ngn_price_provider, atom_coingecko",
-                        provider_name
-                    ));
-                }
-            };
-
-            intent_executor.add_price_provider(provider);
-            info!("Successfully added price provider: {}", provider_name);
-        }
-        Commands::RemovePriceProvider { provider_name } => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let mut intent_executor =
-                IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                    .await
-                    .context("Failed to initialize IntentExecutor")?;
-
-            if intent_executor.remove_price_provider(&provider_name) {
-                info!("Successfully removed price provider: {}", provider_name);
-            } else {
-                warn!("Failed to remove price provider: {}", provider_name);
-            }
-        }
-        Commands::ListPriceProviders => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let intent_executor = IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                .await
-                .context("Failed to initialize IntentExecutor")?;
-
-            let providers = intent_executor.list_price_providers();
-            info!("Price Providers:");
-            for provider in providers {
-                info!("- {}", provider);
-            }
-        }
-        Commands::AddForexProvider {
-            provider_name,
-            api_key,
-        } => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let mut intent_executor =
-                IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                    .await
-                    .context("Failed to initialize IntentExecutor")?;
-
-            let provider: Box<dyn ForexProvider> = match provider_name.as_str() {
-                "exchangerate_api" => Box::new(ExchangeRateApiProvider),
-                "currencylayer" => Box::new(CurrencyLayerProvider::new(api_key)),
-                _ => {
-                    return Err(anyhow::anyhow!(
-                        "Unknown forex provider: {}. Supported: exchangerate_api, currencylayer",
-                        provider_name
-                    ));
-                }
-            };
-
-            intent_executor.add_forex_provider(provider);
-            info!("Successfully added forex provider: {}", provider_name);
-        }
-        Commands::RemoveForexProvider { provider_name } => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let mut intent_executor =
-                IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                    .await
-                    .context("Failed to initialize IntentExecutor")?;
-
-            if intent_executor.remove_forex_provider(&provider_name) {
-                info!("Successfully removed forex provider: {}", provider_name);
-            } else {
-                warn!("Failed to remove forex provider: {}", provider_name);
-            }
-        }
-        Commands::ListForexProviders => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let intent_executor = IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                .await
-                .context("Failed to initialize IntentExecutor")?;
-
-            let providers = intent_executor.list_forex_providers();
-            info!("Forex Providers:");
-            for provider in providers {
-                info!("- {}", provider);
-            }
-        }
-        Commands::ListSupportedCurrencyPairs => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let intent_executor = IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                .await
-                .context("Failed to initialize IntentExecutor")?;
-
-            let pairs = intent_executor.get_supported_currency_pairs();
-            info!("Supported Currency Pairs:");
-            for (provider, currencies) in pairs {
-                info!("Provider: {}", provider);
-                info!("  Currencies: {}", currencies.join(", "));
-            }
-        }
-        Commands::CheckCurrencyPair {
-            base_currency,
-            target_currency,
-        } => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let intent_executor = IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                .await
-                .context("Failed to initialize IntentExecutor")?;
-
-            let supported =
-                intent_executor.supports_currency_pair(&base_currency, &target_currency);
-            info!(
-                "{}/{} is {}supported",
-                base_currency,
-                target_currency,
-                if supported { "" } else { "not " }
-            );
-        }
-        Commands::GetMultipleExchangeRates { pairs } => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let intent_executor = IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                .await
-                .context("Failed to initialize IntentExecutor")?;
-
-            let currency_pairs: Vec<(String, String)> = pairs
-                .into_iter()
-                .filter_map(|pair| {
-                    let parts: Vec<&str> = pair.split('/').collect();
-                    if parts.len() == 2 {
-                        Some((parts[0].to_string(), parts[1].to_string()))
-                    } else {
-                        error!("Invalid currency pair format: {}", pair);
-                        None
+                    Err(e) => {
+                        error!("Command error: {}", e);
                     }
-                })
-                .collect();
-
-            let rates = intent_executor
-                .get_multiple_exchange_rates(&currency_pairs)
-                .await
-                .context("Failed to fetch exchange rates")?;
-
-            info!("Exchange Rates:");
-            for (key, rate) in rates {
-                info!("{}: {:.4}", key, rate);
-            }
-        }
-        Commands::ClearForexCache { currency_pair } => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let intent_executor = IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                .await
-                .context("Failed to initialize IntentExecutor")?;
-
-            let pair = currency_pair.and_then(|pair| {
-                let parts: Vec<&str> = pair.split('/').collect();
-                if parts.len() == 2 {
-                    Some((parts[0].to_string(), parts[1].to_string()))
-                } else {
-                    error!("Invalid currency pair format: {}", pair);
-                    None
                 }
-            });
-
-            intent_executor
-                .clear_forex_cache(
-                    pair.as_ref()
-                        .map(|(base, quote)| (base.as_str(), quote.as_str())),
-                )
-                .await;
-        }
-        Commands::ClearPriceCache => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let intent_executor = IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                .await
-                .context("Failed to initialize IntentExecutor")?;
-
-            intent_executor.clear_price_cache().await;
-        }
-        Commands::SetMinProfitPercentage { percentage } => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let mut intent_executor =
-                IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                    .await
-                    .context("Failed to initialize IntentExecutor")?;
-
-            intent_executor
-                .set_min_profit_percentage(percentage)
-                .context("Failed to set minimum profit percentage")?;
-        }
-        Commands::GetMinProfitPercentage => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let intent_executor = IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                .await
-                .context("Failed to initialize IntentExecutor")?;
-
-            info!(
-                "Minimum Profit Percentage: {}%",
-                intent_executor.get_min_profit_percentage() * 100.0
-            );
-        }
-        Commands::SetForexCacheDuration { hours } => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let mut intent_executor =
-                IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                    .await
-                    .context("Failed to initialize IntentExecutor")?;
-
-            intent_executor.set_forex_cache_duration_hours(hours);
-        }
-        Commands::GetForexCacheDuration => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let intent_executor = IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                .await
-                .context("Failed to initialize IntentExecutor")?;
-
-            info!(
-                "Forex Cache Duration: {} hours",
-                intent_executor.get_forex_cache_duration_hours()
-            );
-        }
-        Commands::GetForexCacheStats => {
-            let mnemonic = env::var("MNEMONIC")
-                .ok()
-                .or_else(|| config.load_mnemonic().ok().flatten())
-                .context("Mnemonic not provided in MNEMONIC env var or mnemonic.txt")?;
-
-            let intent_executor = IntentExecutor::new(config, mnemonic, cli.min_profit_percentage)
-                .await
-                .context("Failed to initialize IntentExecutor")?;
-
-            let stats = intent_executor.get_forex_cache_stats().await;
-            info!("Forex Cache Statistics:");
-            for (key, value) in stats {
-                info!("{}: {}", key, value);
             }
+        })
+    };
+
+    // Wait for shutdown signal or CLI exit
+    info!("Filler started. Press Ctrl+C or type 'exit' to stop.");
+    tokio::select! {
+        _ = signal::ctrl_c() => {
+            info!("Shutdown signal received.");
+        }
+        _ = cli_handle => {
+            info!("CLI loop exited.");
         }
     }
 
+    // Clean up resources
+    info!("Cleaning up...");
+    event_manager.lock().await.stop().await;
+    {
+        let executor = intent_executor.lock().await;
+        executor.clear_price_cache().await;
+        executor.clear_forex_cache(None).await;
+    }
+
+    if let Err(e) = event_manager_handle.await {
+        warn!("Event manager task did not shut down cleanly: {}", e);
+    }
+
+    info!("Shutdown complete.");
     Ok(())
 }
 
-// Process runtime CLI commands
+/// Processes runtime CLI commands for the beep-filler application.
+///
+/// Handles commands to manage price and forex providers, fetch exchange rates, and configure settings.
+/// Returns `false` to exit the CLI loop when the `exit` command is issued, `true` otherwise.
+///
+/// # Arguments
+///
+/// * `intent_executor` - Shared reference to the `IntentExecutor` for executing commands.
+/// * `command` - The command string entered by the user.
+///
+/// # Returns
+///
+/// A `Result` containing a boolean indicating whether to continue the CLI loop (`true`) or exit (`false`).
+/// Errors are returned for invalid commands or execution failures.
+///
+/// # Commands
+///
+/// - `help`: Displays available commands.
+/// - `exit`: Exits the CLI loop.
+/// - `add-price-provider <name>`: Adds a price provider (e.g., `ngn_price_provider`, `atom_coingecko`).
+/// - `remove-price-provider <name>`: Removes a price provider.
+/// - `list-price-providers`: Lists all price providers.
+/// - `add-forex-provider <name> [api-key]`: Adds a forex provider (e.g., `exchange_rate_api`, `currency_layer`).
+/// - `remove-forex-provider <name>`: Removes a forex provider.
+/// - `list-forex-providers`: Lists all forex providers.
+/// - `list-supported-currency-pairs`: Lists supported currency pairs by provider.
+/// - `check-currency-pair <base> <target>`: Checks if a currency pair is supported.
+/// - `get-multiple-exchange-rates <pairs>`: Fetches rates for multiple pairs (e.g., `USD/NGN,EUR/NGN`).
+/// - `clear-forex-cache [pair]`: Clears the forex cache, optionally for a specific pair.
+/// - `clear-price-cache`: Clears the price cache.
+/// - `set-min-profit-percentage <percentage>`: Sets the minimum profit percentage.
+/// - `get-min-profit-percentage`: Gets the current minimum profit percentage.
+/// - `set-forex-cache-duration <hours>`: Sets the forex cache duration in hours.
+/// - `get-forex-cache-duration`: Gets the current forex cache duration.
+/// - `get-forex-cache-stats`: Displays forex cache statistics.
 async fn process_command(
     intent_executor: &Arc<Mutex<IntentExecutor>>,
     command: &str,
@@ -631,7 +359,7 @@ async fn process_command(
   add-price-provider <name> - Add a price provider (ngn_price_provider, atom_coingecko)
   remove-price-provider <name> - Remove a price provider
   list-price-providers - List all price providers
-  add-forex-provider <name> [api-key] - Add a forex provider (exchangerate_api, currencylayer)
+  add-forex-provider <name> [api-key] - Add a forex provider (exchange_rate_api, currency_layer)
   remove-forex-provider <name> - Remove a forex provider
   list-forex-providers - List all forex providers
   list-supported-currency-pairs - List supported currency pairs
@@ -703,11 +431,14 @@ async fn process_command(
             let provider_name = parts[1];
             let api_key = parts.get(2).map(|s| s.to_string());
             let provider: Box<dyn ForexProvider> = match provider_name {
-                "exchangerate_api" => Box::new(ExchangeRateApiProvider),
-                "currencylayer" => Box::new(CurrencyLayerProvider::new(api_key)),
+                "exchange_rate_api" => Box::new(ExchangeRateApiProvider),
+                "currency_layer" => {
+                    let api_key = api_key.context("API key required for currency_layer")?;
+                    Box::new(CurrencyLayerProvider::new(api_key))
+                }
                 _ => {
                     info!(
-                        "Unknown provider: {}. Supported: exchangerate_api, currencylayer",
+                        "Unknown provider: {}. Supported: exchange_rate_api, currency_layer",
                         provider_name
                     );
                     return Ok(true);

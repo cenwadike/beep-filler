@@ -1,4 +1,4 @@
 /target
 Cargo.lock
 mnemonic.txt
-.env*
+.env
