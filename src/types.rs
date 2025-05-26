@@ -1,4 +1,5 @@
 use cosmwasm_std::{Addr, Uint128};
+use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -100,3 +101,14 @@ pub struct TxResult {
 }
 
 pub type EventAttributes = HashMap<String, String>;
+
+#[derive(Debug)]
+pub struct ProfitAnalysis {
+    pub input_value_usd: Decimal,
+    pub output_value_usd: Decimal,
+    pub tip_value_usd: Decimal,
+    pub total_revenue_usd: Decimal,
+    pub profit_usd: Decimal,
+    pub profit_percentage: Decimal,
+    pub is_profitable: bool,
+}

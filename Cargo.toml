@@ -8,23 +8,26 @@ name = "beep-filler"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
+base64 = "0.21"
+bip39 = "2.0"
+bip32 = "0.5"
+clap = { version = "4.0", features = ["derive"] }
+cosmrs = { version = "0.16", features = ["cosmwasm", "rpc"] }
+cosmwasm-std = "2.2.2"
+dashmap = "6.1.0"
+dotenv = "0.15"
+env_logger = "0.10"
+futures = "0.3"
+k256 = { version = "0.13", features = ["ecdsa"] }
+log = "0.4"
+reqwest = { version = "0.11", features = ["json"] }
+rust_decimal = "1.37.1"
+schemars = "0.8.22"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.11", features = ["json"] }
-anyhow = "1.0"
-log = "0.4"
-env_logger = "0.10"
-cosmrs = { version = "0.16", features = ["cosmwasm", "rpc"] }
+sha2 = "0.10.9"
 tendermint = "0.34"
 tendermint-rpc = { version = "0.34", features = ["http-client", "websocket-client"] }
-base64 = "0.21"
-clap = { version = "4.0", features = ["derive"] }
-dotenv = "0.15"
-futures = "0.3"
+tokio = { version = "1.0", features = ["full"] }
 tokio-stream = "0.1"
-dashmap = "6.1.0"
-sha2 = "0.10.9"
-bip32 = "0.5"
-cosmwasm-std = "2.2.2"
-schemars = "0.8.22"

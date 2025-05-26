@@ -455,7 +455,10 @@ impl IntentEventManager {
         self.consumer.start(processor).await?;
 
         // Log final event count
-        info!("Event manager stopped, final event count: {}", self.event_count());
+        info!(
+            "Event manager stopped, final event count: {}",
+            self.event_count()
+        );
 
         Ok(())
     }
